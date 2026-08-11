@@ -5,7 +5,7 @@ compatibility_date = "2026-08-06"
 [[d1_databases]]
 binding = "DB"
 database_name = "azent-support-db"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "06a11e4a-b323-4d8b-8e67-ffc5f4052a93"
 
 [triggers]
 crons = ["*/10 * * * *"]
@@ -17,4 +17,4 @@ APPROVAL_THRESHOLD = "10000"
 [[env.staging.d1_databases]]
 binding = "DB"
 database_name = "azent-support-db-staging"
-database_id = "REPLACE_WITH_YOUR_STAGING_D1_DATABASE_ID"
+database_id = "ec70ea8a-72e4-4cba-bb20-9c0276426ee6"
