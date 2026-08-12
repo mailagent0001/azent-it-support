@@ -13,7 +13,9 @@ const TIMEOUT_MINUTES = 10;
 export class Dispatcher {
   constructor(env) {
     this.db = env.DB;
+    // 顧客向け通知は顧客用チャネル、業者向け通知は業者用チャネルを使う
     this.line = new LineClient(env.LINE_CHANNEL_ACCESS_TOKEN);
+    this.vendorLine = new LineClient(env.VENDOR_LINE_CHANNEL_ACCESS_TOKEN || env.LINE_CHANNEL_ACCESS_TOKEN);
     this.adminLineId = env.AZENT_ADMIN_LINE_ID || null;
   }
 
@@ -35,7 +37,7 @@ export class Dispatcher {
       const company = await this.db.prepare(
         'SELECT * FROM companies WHERE company_id = ?'
       ).bind(companyId).first();
-      await this.line.push(vendor.line_id, this._buildVendorNotice(dispatchId, company, symptomText));
+      await this.vendorLine.push(vendor.line_id, this._buildVendorNotice(dispatchId, company, symptomText));
     } else {
       await this._escalateToAdmin(dispatchId, companyId, symptomText, '業者未登録');
     }
@@ -97,7 +99,7 @@ export class Dispatcher {
       const company = await this.db.prepare(
         'SELECT * FROM companies WHERE company_id = ?'
       ).bind(log.company_id).first();
-      await this.line.push(nextVendor.line_id, this._buildVendorNotice(log.dispatch_id, company, log.symptom));
+      await this.vendorLine.push(nextVendor.line_id, this._buildVendorNotice(log.dispatch_id, company, log.symptom));
     }
   }
 
