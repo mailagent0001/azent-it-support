@@ -75,6 +75,34 @@ export class Dispatcher {
     return true;
   }
 
+  /** 受注後のキャンセル。CLへお詫び通知しつつ即座に次の業者へ再手配する */
+  async cancelAndReassign(vendorId, dispatchId = null) {
+    const log = dispatchId
+      ? await this.db.prepare(`
+          SELECT * FROM dispatch_log WHERE vendor_id = ? AND dispatch_id = ? AND status = 'accepted'
+        `).bind(vendorId, dispatchId).first()
+      : await this.db.prepare(`
+          SELECT * FROM dispatch_log WHERE vendor_id = ? AND status = 'accepted'
+          ORDER BY dispatched_at DESC LIMIT 1
+        `).bind(vendorId).first();
+
+    if (!log) return null;
+
+    const company = await this.db.prepare(
+      'SELECT * FROM companies WHERE company_id = ?'
+    ).bind(log.company_id).first();
+    const notifyTarget = company?.group_line_id || company?.approver_line_id;
+    if (notifyTarget) {
+      await this.line.push(
+        notifyTarget,
+        `担当業者の都合により、別の業者を再手配しております。今しばらくお待ちください。`
+      );
+    }
+
+    await this._forwardToNext(log);
+    return { dispatch_id: log.dispatch_id };
+  }
+
   async setEtaAndNotifyCustomer(vendorId, dispatchId, etaMinutes, etaLabel) {
     const log = await this.db.prepare(`
       SELECT dl.*, c.company_name, c.group_line_id, c.approver_line_id
@@ -141,7 +169,7 @@ export class Dispatcher {
     }
 
     await this.db.prepare(`
-      UPDATE dispatch_log SET vendor_id = ?, dispatched_at = ? WHERE dispatch_id = ?
+      UPDATE dispatch_log SET vendor_id = ?, dispatched_at = ?, status = 'pending' WHERE dispatch_id = ?
     `).bind(nextVendor.vendor_id, new Date().toISOString(), log.dispatch_id).run();
 
     if (nextVendor.line_id) {

@@ -1,9 +1,9 @@
 /**
- * A-Zent IT保守サブスク - Cloudflare Workers メインエントリ v2.4
+ * A-Zent IT保守サブスク - Cloudflare Workers メインエントリ v2.5
  *
- * v2.4変更点:
- *   業者向け機器一覧ページ(/devices/:dispatchId)を追加。
- *   案件通知メッセージ本文に機器一覧ページへのURLリンクを追記。
+ * v2.5変更点:
+ *   業者が受注後に「キャンセル」と送ると、CLへお詫び通知しつつ
+ *   即座に次の業者へ自動再手配する機能を追加。
  */
 
 import { MatchEngine }    from './matchEngine.js';
@@ -231,12 +231,24 @@ async function handleVendorWebhook(request, env) {
       if (event.type !== 'message' || event.message?.type !== 'text') continue;
       const text = event.message.text;
 
+      if (text.includes('キャンセル')) {
+        const dispatcher = new Dispatcher(env);
+        const result = await dispatcher.cancelAndReassign(vendor.vendor_id);
+        await line.reply(
+          event.replyToken,
+          result
+            ? `キャンセルを受け付けました。次の業者へ再手配します。\n(案件ID: ${result.dispatch_id})`
+            : '受注中の案件が見つかりませんでした。'
+        );
+        continue;
+      }
+
       if (text.includes('報告')) {
         await line.reply(event.replyToken, '修繕報告ありがとうございます。内容を確認後、ご連絡します。');
         continue;
       }
 
-      await line.reply(event.replyToken, '案件通知のボタンから「受注する」または「見送る」を選択するか、「報告」で返信してください。');
+      await line.reply(event.replyToken, '案件通知のボタンから「受注する」または「見送る」を選択するか、受注後のキャンセルは「キャンセル」、対応後は「報告」で返信してください。');
     }
 
     return Response.json({ status: 'ok' });
