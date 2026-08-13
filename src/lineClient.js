@@ -1,6 +1,5 @@
 /**
  * LINE Messaging APIクライアント
- * reply(replyToken付き返信) / push(任意のuserIdへ送信) / multicast(一括送信)
  */
 
 const LINE_API = 'https://api.line.me/v2/bot/message';
@@ -8,51 +7,70 @@ const LINE_API = 'https://api.line.me/v2/bot/message';
 export class LineClient {
   constructor(token) { this.token = token; }
 
-  async reply(replyToken, text) {
-    if (!this.token || !replyToken) {
-      console.error('LineClient.reply: token or replyToken missing', { hasToken: !!this.token, replyToken });
-      return;
-    }
-    const res = await fetch(`${LINE_API}/reply`, {
+  async _post(path, body) {
+    const res = await fetch(`${LINE_API}/${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.token}` },
-      body: JSON.stringify({ replyToken, messages: [{ type: 'text', text: String(text) }] })
+      body: JSON.stringify(body)
     });
     if (!res.ok) {
       const errBody = await res.text();
-      console.error('LineClient.reply failed:', res.status, errBody);
+      console.error(`LineClient.${path} failed:`, res.status, errBody);
     }
+    return res;
+  }
+
+  async reply(replyToken, text) {
+    if (!this.token || !replyToken) {
+      console.error('LineClient.reply: token or replyToken missing');
+      return;
+    }
+    await this._post('reply', { replyToken, messages: [{ type: 'text', text: String(text) }] });
   }
 
   async push(lineUserId, text) {
     if (!this.token || !lineUserId) {
-      console.error('LineClient.push: token or lineUserId missing', { hasToken: !!this.token, lineUserId });
+      console.error('LineClient.push: token or lineUserId missing');
       return;
     }
-    const res = await fetch(`${LINE_API}/push`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.token}` },
-      body: JSON.stringify({ to: lineUserId, messages: [{ type: 'text', text: String(text) }] })
-    });
-    if (!res.ok) {
-      const errBody = await res.text();
-      console.error('LineClient.push failed:', res.status, errBody);
-    }
+    await this._post('push', { to: lineUserId, messages: [{ type: 'text', text: String(text) }] });
   }
 
   async multicast(lineUserIds, text) {
-    if (!this.token || !lineUserIds?.length) {
-      console.error('LineClient.multicast: token or lineUserIds missing');
-      return;
-    }
-    const res = await fetch(`${LINE_API}/multicast`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.token}` },
-      body: JSON.stringify({ to: lineUserIds, messages: [{ type: 'text', text: String(text) }] })
-    });
-    if (!res.ok) {
-      const errBody = await res.text();
-      console.error('LineClient.multicast failed:', res.status, errBody);
-    }
+    if (!this.token || !lineUserIds?.length) return;
+    await this._post('multicast', { to: lineUserIds, messages: [{ type: 'text', text: String(text) }] });
+  }
+
+  /** ボタン付きメッセージ(最大4個) */
+  async pushButtons(lineUserId, altText, titleText, buttons) {
+    if (!this.token || !lineUserId) return;
+    const message = {
+      type: 'template',
+      altText,
+      template: {
+        type: 'buttons',
+        text: titleText.slice(0, 160),
+        actions: buttons.map(b => ({
+          type: 'postback', label: b.label.slice(0, 20), data: b.data, displayText: b.label
+        }))
+      }
+    };
+    await this._post('push', { to: lineUserId, messages: [message] });
+  }
+
+  /** replyTokenに対してテキスト+Quick Reply(最大13個)を返信 */
+  async replyWithQuickReply(replyToken, text, items) {
+    if (!this.token || !replyToken) return;
+    const message = {
+      type: 'text',
+      text,
+      quickReply: {
+        items: items.map(it => ({
+          type: 'action',
+          action: { type: 'postback', label: it.label.slice(0, 20), data: it.data, displayText: it.label }
+        }))
+      }
+    };
+    await this._post('reply', { replyToken, messages: [message] });
   }
 }

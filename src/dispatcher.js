@@ -1,9 +1,5 @@
 /**
  * 業者ディスパッチエンジン
- *
- * dispatch()       案件を起票し優先順位1位の業者へLINE通知
- * acceptDispatch() 業者が「受注」したら案件を確定
- * checkTimeouts()  Cronで10分ごとに呼び出し。未応答案件を次の業者へ転送
  */
 
 import { LineClient } from './lineClient.js';
@@ -13,7 +9,6 @@ const TIMEOUT_MINUTES = 10;
 export class Dispatcher {
   constructor(env) {
     this.db = env.DB;
-    // 顧客向け通知は顧客用チャネル、業者向け通知は業者用チャネルを使う
     this.line = new LineClient(env.LINE_CHANNEL_ACCESS_TOKEN);
     this.vendorLine = new LineClient(env.VENDOR_LINE_CHANNEL_ACCESS_TOKEN || env.LINE_CHANNEL_ACCESS_TOKEN);
     this.adminLineId = env.AZENT_ADMIN_LINE_ID || null;
@@ -37,7 +32,7 @@ export class Dispatcher {
       const company = await this.db.prepare(
         'SELECT * FROM companies WHERE company_id = ?'
       ).bind(companyId).first();
-      await this.vendorLine.push(vendor.line_id, this._buildVendorNotice(dispatchId, company, symptomText));
+      await this._notifyVendor(vendor.line_id, dispatchId, company, symptomText);
     } else {
       await this._escalateToAdmin(dispatchId, companyId, symptomText, '業者未登録');
     }
@@ -45,13 +40,20 @@ export class Dispatcher {
     return dispatchId;
   }
 
-  async acceptDispatch(vendorId) {
-    const log = await this.db.prepare(`
-      SELECT dl.*, c.company_name FROM dispatch_log dl
-      JOIN companies c ON dl.company_id = c.company_id
-      WHERE dl.vendor_id = ? AND dl.status = 'pending'
-      ORDER BY dl.dispatched_at ASC LIMIT 1
-    `).bind(vendorId).first();
+  /** ボタンで「受注する」を押した時点の確定処理 */
+  async acceptDispatch(vendorId, dispatchId = null) {
+    const log = dispatchId
+      ? await this.db.prepare(`
+          SELECT dl.*, c.company_name FROM dispatch_log dl
+          JOIN companies c ON dl.company_id = c.company_id
+          WHERE dl.vendor_id = ? AND dl.dispatch_id = ? AND dl.status = 'pending'
+        `).bind(vendorId, dispatchId).first()
+      : await this.db.prepare(`
+          SELECT dl.*, c.company_name FROM dispatch_log dl
+          JOIN companies c ON dl.company_id = c.company_id
+          WHERE dl.vendor_id = ? AND dl.status = 'pending'
+          ORDER BY dl.dispatched_at ASC LIMIT 1
+        `).bind(vendorId).first();
 
     if (!log) return null;
 
@@ -60,6 +62,43 @@ export class Dispatcher {
     `).bind(new Date().toISOString(), log.dispatch_id).run();
 
     return { dispatch_id: log.dispatch_id, company_id: log.company_id, company_name: log.company_name };
+  }
+
+  /** 到着予定時間を記録し、CLへ通知する */
+  async setEtaAndNotifyCustomer(vendorId, dispatchId, etaMinutes, etaLabel) {
+    const log = await this.db.prepare(`
+      SELECT dl.*, c.company_name, c.group_line_id, c.approver_line_id
+      FROM dispatch_log dl
+      JOIN companies c ON dl.company_id = c.company_id
+      WHERE dl.vendor_id = ? AND dl.dispatch_id = ? AND dl.status = 'accepted'
+    `).bind(vendorId, dispatchId).first();
+
+    if (!log) return null;
+
+    await this.db.prepare(`
+      UPDATE dispatch_log SET eta_minutes = ? WHERE dispatch_id = ?
+    `).bind(etaMinutes, dispatchId).run();
+
+    const vendor = await this.db.prepare(
+      'SELECT * FROM vendors WHERE vendor_id = ?'
+    ).bind(vendorId).first();
+
+    const notifyTarget = log.group_line_id || log.approver_line_id;
+    if (notifyTarget) {
+      await this.line.push(
+        notifyTarget,
+        [
+          `担当者が手配できました。`,
+          `業者: ${vendor?.vendor_name || '提携業者'}`,
+          `到着予定: 約${etaLabel}`,
+          `案件ID: ${dispatchId}`,
+          ``,
+          `今しばらくお待ちください。`
+        ].join('\n')
+      );
+    }
+
+    return { company_name: log.company_name };
   }
 
   async checkTimeouts() {
@@ -99,8 +138,24 @@ export class Dispatcher {
       const company = await this.db.prepare(
         'SELECT * FROM companies WHERE company_id = ?'
       ).bind(log.company_id).first();
-      await this.vendorLine.push(nextVendor.line_id, this._buildVendorNotice(log.dispatch_id, company, log.symptom));
+      await this._notifyVendor(nextVendor.line_id, log.dispatch_id, company, log.symptom);
     }
+  }
+
+  async _notifyVendor(vendorLineId, dispatchId, company, symptom) {
+    const title = [
+      `【案件通知】A-Zent`,
+      `会社: ${company?.company_name || '不明'}`,
+      `住所: ${company?.address || '不明'}`,
+      `症状: ${symptom}`
+    ].join('\n');
+
+    await this.vendorLine.pushButtons(
+      vendorLineId,
+      `【案件通知】${company?.company_name || ''} - ${symptom}`,
+      title,
+      [{ label: '受注する', data: `action=accept&dispatch_id=${dispatchId}` }]
+    );
   }
 
   async _escalateToAdmin(dispatchId, companyId, symptom, reason) {
@@ -112,17 +167,5 @@ export class Dispatcher {
       this.adminLineId,
       `【要対応】業者手配が完了していません\n理由: ${reason}\n案件ID: ${dispatchId}\n症状: ${symptom}`
     );
-  }
-
-  _buildVendorNotice(dispatchId, company, symptom) {
-    return [
-      `【案件通知】A-Zent`,
-      `会社: ${company?.company_name || '不明'}`,
-      `住所: ${company?.address || '不明'}`,
-      `症状: ${symptom}`,
-      `案件ID: ${dispatchId}`,
-      ``,
-      `対応可能な場合は「受注」と返信してください。`
-    ].join('\n');
   }
 }
