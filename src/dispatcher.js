@@ -153,38 +153,25 @@ export class Dispatcher {
   }
 
   async _notifyVendor(vendorLineId, dispatchId, company, symptom) {
-    const devices = await this.db.prepare(
-      'SELECT device_type, maker, model FROM devices WHERE company_id = ?'
-    ).bind(company?.company_id).all();
-
-    const allDevices = devices.results || [];
-    const shown = allDevices.slice(0, 3)
-      .map(d => `・${d.device_type} ${d.maker || ''}${d.model || ''}`)
-      .join('\n');
-    const remaining = allDevices.length - 3;
-    const deviceSummary = shown
-      ? `\n【保有機器】\n${shown}${remaining > 0 ? `\nほか${remaining}件` : ''}`
-      : '';
-
-    const devicesUrl = `${APP_BASE_URL}/devices/${dispatchId}`;
-
     const title = [
       `【案件通知】A-Zent`,
       `会社: ${company?.company_name || '不明'}`,
       `住所: ${company?.address || '不明'}`,
-      `症状: ${symptom}`,
-      deviceSummary,
-      `\n機器詳細はこちら:\n${devicesUrl}`
-    ].filter(Boolean).join('\n');
+      `症状: ${symptom}`
+    ].join('\n');
 
-    await this.vendorLine.pushButtons(
+    const devicesUrl = `${APP_BASE_URL}/devices/${dispatchId}`;
+    const followupText = `【${company?.company_name || ''}】機器詳細一覧はこちら:\n${devicesUrl}`;
+
+    await this.vendorLine.pushButtonsWithFollowup(
       vendorLineId,
       `【案件通知】${company?.company_name || ''} - ${symptom}`,
       title,
       [
         { label: '受注する', data: `action=accept&dispatch_id=${dispatchId}` },
         { label: '見送る', data: `action=decline&dispatch_id=${dispatchId}` }
-      ]
+      ],
+      followupText
     );
   }
 

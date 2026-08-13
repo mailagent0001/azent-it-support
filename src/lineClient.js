@@ -58,6 +58,30 @@ export class LineClient {
     await this._post('push', { to: lineUserId, messages: [message] });
   }
 
+  /**
+   * ボタン付きメッセージ + 続けて通常テキストメッセージ(URLなど)をまとめて送る。
+   * LINEは1回のpushで最大5メッセージまで送信可能。
+   */
+  async pushButtonsWithFollowup(lineUserId, altText, titleText, buttons, followupText) {
+    if (!this.token || !lineUserId) return;
+    const buttonMessage = {
+      type: 'template',
+      altText,
+      template: {
+        type: 'buttons',
+        text: titleText.slice(0, 160),
+        actions: buttons.map(b => ({
+          type: 'postback', label: b.label.slice(0, 20), data: b.data, displayText: b.label
+        }))
+      }
+    };
+    const messages = [buttonMessage];
+    if (followupText) {
+      messages.push({ type: 'text', text: String(followupText) });
+    }
+    await this._post('push', { to: lineUserId, messages });
+  }
+
   /** replyTokenに対してテキスト+Quick Reply(最大13個)を返信 */
   async replyWithQuickReply(replyToken, text, items) {
     if (!this.token || !replyToken) return;
