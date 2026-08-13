@@ -1,9 +1,9 @@
 /**
- * A-Zent IT保守サブスク - Cloudflare Workers メインエントリ v2.3
+ * A-Zent IT保守サブスク - Cloudflare Workers メインエントリ v2.4
  *
- * v2.3変更点:
- *   業者への案件通知に「見送る」ボタンを追加。押されると10分の
- *   タイムアウトを待たずに即座に次の業者へ転送する。
+ * v2.4変更点:
+ *   業者向け機器一覧ページ(/devices/:dispatchId)を追加。
+ *   案件通知メッセージ本文に機器一覧ページへのURLリンクを追記。
  */
 
 import { MatchEngine }    from './matchEngine.js';
@@ -26,6 +26,9 @@ export default {
     if (request.method === 'GET' && url.pathname === '/health') {
       return Response.json({ status: 'ok', timestamp: new Date().toISOString() });
     }
+    if (request.method === 'GET' && url.pathname.startsWith('/devices/')) {
+      return handleDevicesPage(request, env, url.pathname.replace('/devices/', ''));
+    }
     if (request.method === 'POST' && url.pathname === '/webhook/line') {
       return handleCustomerWebhook(request, env);
     }
@@ -40,6 +43,65 @@ export default {
     await dispatcher.checkTimeouts();
   }
 };
+
+async function handleDevicesPage(request, env, dispatchId) {
+  const log = await env.DB.prepare(
+    'SELECT company_id FROM dispatch_log WHERE dispatch_id = ?'
+  ).bind(dispatchId).first();
+
+  if (!log) {
+    return new Response('案件が見つかりません', { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+  }
+
+  const company = await env.DB.prepare(
+    'SELECT * FROM companies WHERE company_id = ?'
+  ).bind(log.company_id).first();
+
+  const devices = await env.DB.prepare(
+    'SELECT * FROM devices WHERE company_id = ?'
+  ).bind(log.company_id).all();
+
+  const rows = (devices.results || []).map(d => `
+    <tr>
+      <td>${escapeHtml(d.device_type || '')}</td>
+      <td>${escapeHtml(d.maker || '')}</td>
+      <td>${escapeHtml(d.model || '')}</td>
+      <td>${escapeHtml(d.location || '')}</td>
+      <td>${escapeHtml(d.notes || '')}</td>
+    </tr>`).join('');
+
+  const html = `<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>機器一覧 - ${escapeHtml(company?.company_name || '')}</title>
+<style>
+  body { font-family: -apple-system, sans-serif; margin: 16px; color: #222; }
+  h1 { font-size: 18px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+  th, td { border: 1px solid #ddd; padding: 8px; font-size: 14px; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+  <h1>${escapeHtml(company?.company_name || '不明')} の登録機器一覧</h1>
+  <p>住所: ${escapeHtml(company?.address || '不明')}</p>
+  <table>
+    <tr><th>種別</th><th>メーカー</th><th>型番</th><th>設置場所</th><th>備考</th></tr>
+    ${rows || '<tr><td colspan="5">登録機器がありません</td></tr>'}
+  </table>
+</body>
+</html>`;
+
+  return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
 
 async function resolveCompany(event, db) {
   const sourceType = event.source?.type;

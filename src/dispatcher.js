@@ -5,6 +5,7 @@
 import { LineClient } from './lineClient.js';
 
 const TIMEOUT_MINUTES = 10;
+const APP_BASE_URL = 'https://azent-it-support.mailagent0001.workers.dev';
 
 export class Dispatcher {
   constructor(env) {
@@ -63,7 +64,6 @@ export class Dispatcher {
     return { dispatch_id: log.dispatch_id, company_id: log.company_id, company_name: log.company_name };
   }
 
-  /** 「見送る」ボタンが押された時点で即座に次の業者へ転送する */
   async declineAndForward(vendorId, dispatchId) {
     const log = await this.db.prepare(`
       SELECT * FROM dispatch_log WHERE vendor_id = ? AND dispatch_id = ? AND status = 'pending'
@@ -157,16 +157,24 @@ export class Dispatcher {
       'SELECT device_type, maker, model FROM devices WHERE company_id = ?'
     ).bind(company?.company_id).all();
 
-    const deviceList = (devices.results || [])
+    const allDevices = devices.results || [];
+    const shown = allDevices.slice(0, 3)
       .map(d => `・${d.device_type} ${d.maker || ''}${d.model || ''}`)
       .join('\n');
+    const remaining = allDevices.length - 3;
+    const deviceSummary = shown
+      ? `\n【保有機器】\n${shown}${remaining > 0 ? `\nほか${remaining}件` : ''}`
+      : '';
+
+    const devicesUrl = `${APP_BASE_URL}/devices/${dispatchId}`;
 
     const title = [
       `【案件通知】A-Zent`,
       `会社: ${company?.company_name || '不明'}`,
       `住所: ${company?.address || '不明'}`,
       `症状: ${symptom}`,
-      deviceList ? `\n【保有機器】\n${deviceList}` : ''
+      deviceSummary,
+      `\n機器詳細はこちら:\n${devicesUrl}`
     ].filter(Boolean).join('\n');
 
     await this.vendorLine.pushButtons(
