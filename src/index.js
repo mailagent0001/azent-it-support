@@ -1,9 +1,9 @@
 /**
- * A-Zent IT保守サブスク - Cloudflare Workers メインエントリ v2.2
+ * A-Zent IT保守サブスク - Cloudflare Workers メインエントリ v2.3
  *
- * v2.2変更点:
- *   業者の受注をボタン(postback)化。受注→到着予定時間(Quick Reply)選択の
- *   2段階フローに変更。到着予定時間はCL側への通知にも反映。
+ * v2.3変更点:
+ *   業者への案件通知に「見送る」ボタンを追加。押されると10分の
+ *   タイムアウトを待たずに即座に次の業者へ転送する。
  */
 
 import { MatchEngine }    from './matchEngine.js';
@@ -142,6 +142,15 @@ async function handleVendorWebhook(request, env) {
           continue;
         }
 
+        if (action === 'decline') {
+          const ok = await dispatcher.declineAndForward(vendor.vendor_id, dispatchId);
+          await line.reply(
+            event.replyToken,
+            ok ? '見送りを受け付けました。次の業者へ案内します。' : 'この案件は既に処理済み、または見つかりませんでした。'
+          );
+          continue;
+        }
+
         if (action === 'eta') {
           const minutes = parseInt(params.get('minutes'), 10);
           const opt = ETA_OPTIONS.find(o => o.minutes === minutes);
@@ -165,7 +174,7 @@ async function handleVendorWebhook(request, env) {
         continue;
       }
 
-      await line.reply(event.replyToken, '案件通知のボタンから「受注する」を押すか、「報告」で返信してください。');
+      await line.reply(event.replyToken, '案件通知のボタンから「受注する」または「見送る」を選択するか、「報告」で返信してください。');
     }
 
     return Response.json({ status: 'ok' });

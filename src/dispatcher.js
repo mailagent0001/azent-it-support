@@ -63,6 +63,18 @@ export class Dispatcher {
     return { dispatch_id: log.dispatch_id, company_id: log.company_id, company_name: log.company_name };
   }
 
+  /** 「見送る」ボタンが押された時点で即座に次の業者へ転送する */
+  async declineAndForward(vendorId, dispatchId) {
+    const log = await this.db.prepare(`
+      SELECT * FROM dispatch_log WHERE vendor_id = ? AND dispatch_id = ? AND status = 'pending'
+    `).bind(vendorId, dispatchId).first();
+
+    if (!log) return false;
+
+    await this._forwardToNext(log);
+    return true;
+  }
+
   async setEtaAndNotifyCustomer(vendorId, dispatchId, etaMinutes, etaLabel) {
     const log = await this.db.prepare(`
       SELECT dl.*, c.company_name, c.group_line_id, c.approver_line_id
@@ -161,7 +173,10 @@ export class Dispatcher {
       vendorLineId,
       `【案件通知】${company?.company_name || ''} - ${symptom}`,
       title,
-      [{ label: '受注する', data: `action=accept&dispatch_id=${dispatchId}` }]
+      [
+        { label: '受注する', data: `action=accept&dispatch_id=${dispatchId}` },
+        { label: '見送る', data: `action=decline&dispatch_id=${dispatchId}` }
+      ]
     );
   }
 
