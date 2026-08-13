@@ -40,7 +40,6 @@ export class Dispatcher {
     return dispatchId;
   }
 
-  /** ボタンで「受注する」を押した時点の確定処理 */
   async acceptDispatch(vendorId, dispatchId = null) {
     const log = dispatchId
       ? await this.db.prepare(`
@@ -64,7 +63,6 @@ export class Dispatcher {
     return { dispatch_id: log.dispatch_id, company_id: log.company_id, company_name: log.company_name };
   }
 
-  /** 到着予定時間を記録し、CLへ通知する */
   async setEtaAndNotifyCustomer(vendorId, dispatchId, etaMinutes, etaLabel) {
     const log = await this.db.prepare(`
       SELECT dl.*, c.company_name, c.group_line_id, c.approver_line_id
@@ -143,12 +141,21 @@ export class Dispatcher {
   }
 
   async _notifyVendor(vendorLineId, dispatchId, company, symptom) {
+    const devices = await this.db.prepare(
+      'SELECT device_type, maker, model FROM devices WHERE company_id = ?'
+    ).bind(company?.company_id).all();
+
+    const deviceList = (devices.results || [])
+      .map(d => `・${d.device_type} ${d.maker || ''}${d.model || ''}`)
+      .join('\n');
+
     const title = [
       `【案件通知】A-Zent`,
       `会社: ${company?.company_name || '不明'}`,
       `住所: ${company?.address || '不明'}`,
-      `症状: ${symptom}`
-    ].join('\n');
+      `症状: ${symptom}`,
+      deviceList ? `\n【保有機器】\n${deviceList}` : ''
+    ].filter(Boolean).join('\n');
 
     await this.vendorLine.pushButtons(
       vendorLineId,
