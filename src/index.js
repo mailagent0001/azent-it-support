@@ -1,9 +1,12 @@
 /**
- * A-Zent IT保守サブスク - Cloudflare Workers メインエントリ v2.5
+ * A-Zent IT保守サブスク - Cloudflare Workers メインエントリ v2.6
  *
- * v2.5変更点:
- *   業者が受注後に「キャンセル」と送ると、CLへお詫び通知しつつ
- *   即座に次の業者へ自動再手配する機能を追加。
+ * v2.6変更点:
+ *   CL側の一次対応を拡充。
+ *   ・同種機器が複数登録 → Quick Replyで機種選択させてから回答
+ *   ・該当機器が未登録   → メーカー・型番をその場で聞いて自己登録し、
+ *                          登録した機器で改めて照合・回答
+ *   会話の一時状態は conversation_state テーブルに保存する。
  */
 
 import { MatchEngine }    from './matchEngine.js';
@@ -115,6 +118,35 @@ async function resolveCompany(event, db) {
   return await db.prepare('SELECT * FROM companies WHERE approver_line_id = ?').bind(userId).first();
 }
 
+// ============================================================
+// 会話状態(機種選択待ち・機種登録待ち)の保存/取得/削除
+// ============================================================
+async function saveState(db, key, companyId, stateType, payload) {
+  await db.prepare(`
+    INSERT INTO conversation_state (key, company_id, state_type, payload, created_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(key) DO UPDATE SET state_type = excluded.state_type, payload = excluded.payload, created_at = excluded.created_at
+  `).bind(key, companyId, stateType, JSON.stringify(payload), new Date().toISOString()).run();
+}
+
+async function getState(db, key) {
+  const row = await db.prepare('SELECT * FROM conversation_state WHERE key = ?').bind(key).first();
+  if (!row) return null;
+  return { ...row, payload: row.payload ? JSON.parse(row.payload) : null };
+}
+
+async function clearState(db, key) {
+  await db.prepare('DELETE FROM conversation_state WHERE key = ?').bind(key).run();
+}
+
+function stateKeyFor(event) {
+  const sourceType = event.source?.type;
+  if (sourceType === 'group' || sourceType === 'room') {
+    return `g:${event.source.groupId || event.source.roomId}`;
+  }
+  return `u:${event.source?.userId}`;
+}
+
 async function handleCustomerWebhook(request, env) {
   try {
     const body = await request.text();
@@ -132,13 +164,60 @@ async function handleCustomerWebhook(request, env) {
     const matcher = new MatchEngine(env.DB);
 
     for (const event of events) {
-      if (event.type !== 'message' || event.message?.type !== 'text') continue;
-
-      const symptomText = event.message.text;
-      const company     = await resolveCompany(event, env.DB);
-
+      const company = await resolveCompany(event, env.DB);
       if (!company) {
-        await line.reply(event.replyToken, '登録されていないLINEアカウント/グループです。担当者にご確認ください。');
+        if (event.type === 'message' && event.message?.type === 'text') {
+          await line.reply(event.replyToken, '登録されていないLINEアカウント/グループです。担当者にご確認ください。');
+        }
+        continue;
+      }
+
+      const key = stateKeyFor(event);
+
+      // 機種選択の postback
+      if (event.type === 'postback') {
+        const params = new URLSearchParams(event.postback.data);
+        if (params.get('action') === 'select_device') {
+          const deviceId = params.get('device_id');
+          const state = await getState(env.DB, key);
+          const symptomText = state?.payload?.symptomText || '';
+          await clearState(env.DB, key);
+
+          const result = await matcher.matchForDevice(deviceId, symptomText);
+          await handleMatchResult(env, line, event.replyToken, company, symptomText, result);
+        }
+        continue;
+      }
+
+      if (event.type !== 'message' || event.message?.type !== 'text') continue;
+      const symptomText = event.message.text;
+
+      // 機種登録待ちの状態か確認(「メーカー 型番」の形式で返信されることを想定)
+      const state = await getState(env.DB, key);
+      if (state?.state_type === 'awaiting_device_registration') {
+        const parts = symptomText.trim().split(/\s+/);
+        const maker = parts[0] || '';
+        const model = parts.slice(1).join(' ') || '';
+        const deviceType = state.payload.deviceType;
+        const origSymptom = state.payload.symptomText;
+
+        const newDeviceId = `D${Date.now()}`;
+        await env.DB.prepare(`
+          INSERT INTO devices (device_id, company_id, device_type, maker, model, location, install_date, notes)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(newDeviceId, company.company_id, deviceType, maker, model, '未設定', new Date().toISOString().slice(0, 10), 'CL自己登録').run();
+
+        await clearState(env.DB, key);
+
+        const result = await matcher.matchForDevice(newDeviceId, origSymptom);
+        await line.reply(
+          event.replyToken,
+          `機器を登録しました(${maker} ${model})。\n\n` + buildCustomerReply(result)
+        );
+        if (result.status === 'escalate_immediately' || result.status === 'no_match') {
+          const dispatcher = new Dispatcher(env);
+          await dispatcher.dispatch(company.company_id, origSymptom, result.status, { maker, model });
+        }
         continue;
       }
 
@@ -149,20 +228,46 @@ async function handleCustomerWebhook(request, env) {
         continue;
       }
 
-      const result    = await matcher.match(company.company_id, symptomText);
-      const replyText = buildCustomerReply(result);
-      await line.reply(event.replyToken, replyText);
+      const result = await matcher.match(company.company_id, symptomText);
 
-      if (result.status === 'escalate_immediately' || result.status === 'no_match') {
-        const dispatcher = new Dispatcher(env);
-        await dispatcher.dispatch(company.company_id, symptomText, result.status);
+      if (result.status === 'needs_device_selection') {
+        await saveState(env.DB, key, company.company_id, 'awaiting_device_selection', { symptomText });
+        await line.replyWithQuickReply(
+          event.replyToken,
+          `該当する${result.deviceType}が複数登録されています。どちらですか?`,
+          result.options.map(o => ({ label: o.label, data: `action=select_device&device_id=${o.device_id}` }))
+        );
+        continue;
       }
+
+      if (result.status === 'needs_device_registration') {
+        await saveState(env.DB, key, company.company_id, 'awaiting_device_registration', { symptomText, deviceType: result.deviceType });
+        await line.reply(
+          event.replyToken,
+          `${result.deviceType}のようですが、登録されていない機器のようです。\nメーカーと型番を教えてください。\n(例: Canon iR-ADV C3830)`
+        );
+        continue;
+      }
+
+      await handleMatchResult(env, line, event.replyToken, company, symptomText, result);
     }
 
     return Response.json({ status: 'ok' });
   } catch (err) {
     console.error('handleCustomerWebhook error:', err);
     return Response.json({ status: 'error', message: String(err) }, { status: 500 });
+  }
+}
+
+async function handleMatchResult(env, line, replyToken, company, symptomText, result) {
+  const replyText = buildCustomerReply(result);
+  await line.reply(replyToken, replyText);
+
+  if (result.status === 'escalate_immediately' || result.status === 'no_match') {
+    const dispatcher = new Dispatcher(env);
+    await dispatcher.dispatch(company.company_id, symptomText, result.status, {
+      maker: result.deviceMaker, model: result.deviceModel
+    });
   }
 }
 

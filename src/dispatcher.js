@@ -1,5 +1,8 @@
 /**
- * 業者ディスパッチエンジン
+ * 業者ディスパッチエンジン v2
+ *
+ * v2変更点: dispatch()に機種情報(maker/model)を渡せるようにし、
+ * 業者への通知に反映(解決を早める)。
  */
 
 import { LineClient } from './lineClient.js';
@@ -15,7 +18,7 @@ export class Dispatcher {
     this.adminLineId = env.AZENT_ADMIN_LINE_ID || null;
   }
 
-  async dispatch(companyId, symptomText, matchedStatus) {
+  async dispatch(companyId, symptomText, matchedStatus, deviceInfo = null) {
     const dispatchId = `D${Date.now()}`;
     const now = new Date().toISOString();
 
@@ -23,19 +26,23 @@ export class Dispatcher {
       'SELECT * FROM vendors ORDER BY priority ASC LIMIT 1'
     ).first();
 
+    const fullSymptom = deviceInfo?.maker || deviceInfo?.model
+      ? `${symptomText}\n(機器: ${deviceInfo.maker || ''} ${deviceInfo.model || ''})`
+      : symptomText;
+
     await this.db.prepare(`
       INSERT INTO dispatch_log
         (dispatch_id, company_id, symptom, matched_status, vendor_id, dispatched_at, status)
       VALUES (?, ?, ?, ?, ?, ?, 'pending')
-    `).bind(dispatchId, companyId, symptomText, matchedStatus, vendor?.vendor_id || null, now).run();
+    `).bind(dispatchId, companyId, fullSymptom, matchedStatus, vendor?.vendor_id || null, now).run();
 
     if (vendor?.line_id) {
       const company = await this.db.prepare(
         'SELECT * FROM companies WHERE company_id = ?'
       ).bind(companyId).first();
-      await this._notifyVendor(vendor.line_id, dispatchId, company, symptomText);
+      await this._notifyVendor(vendor.line_id, dispatchId, company, fullSymptom);
     } else {
-      await this._escalateToAdmin(dispatchId, companyId, symptomText, '業者未登録');
+      await this._escalateToAdmin(dispatchId, companyId, fullSymptom, '業者未登録');
     }
 
     return dispatchId;
@@ -75,7 +82,6 @@ export class Dispatcher {
     return true;
   }
 
-  /** 受注後のキャンセル。CLへお詫び通知しつつ即座に次の業者へ再手配する */
   async cancelAndReassign(vendorId, dispatchId = null) {
     const log = dispatchId
       ? await this.db.prepare(`
