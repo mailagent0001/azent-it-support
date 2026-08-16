@@ -1,12 +1,10 @@
 /**
- * A-Zent IT保守サブスク - Cloudflare Workers メインエントリ v2.6
+ * A-Zent IT保守サブスク - Cloudflare Workers メインエントリ v2.7
  *
- * v2.6変更点:
- *   CL側の一次対応を拡充。
- *   ・同種機器が複数登録 → Quick Replyで機種選択させてから回答
- *   ・該当機器が未登録   → メーカー・型番をその場で聞いて自己登録し、
- *                          登録した機器で改めて照合・回答
- *   会話の一時状態は conversation_state テーブルに保存する。
+ * v2.7変更点:
+ *   機種選択の選択肢に「登録されていない機器」を追加。
+ *   選択されると自己登録フロー(メーカー・型番入力→登録→
+ *   ツリー自動生成→照合)へ進む。
  */
 
 import { MatchEngine }    from './matchEngine.js';
@@ -119,9 +117,6 @@ async function resolveCompany(event, db) {
   return await db.prepare('SELECT * FROM companies WHERE approver_line_id = ?').bind(userId).first();
 }
 
-// ============================================================
-// 会話状態(機種選択待ち・機種登録待ち)の保存/取得/削除
-// ============================================================
 async function saveState(db, key, companyId, stateType, payload) {
   await db.prepare(`
     INSERT INTO conversation_state (key, company_id, state_type, payload, created_at)
@@ -146,6 +141,22 @@ function stateKeyFor(event) {
     return `g:${event.source.groupId || event.source.roomId}`;
   }
   return `u:${event.source?.userId}`;
+}
+
+async function registerNewDevice(env, company, deviceType, maker, model) {
+  const newDeviceId = `D${Date.now()}`;
+  await env.DB.prepare(`
+    INSERT INTO devices (device_id, company_id, device_type, maker, model, location, install_date, notes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(newDeviceId, company.company_id, deviceType, maker, model, '未設定', new Date().toISOString().slice(0, 10), 'CL自己登録').run();
+
+  try {
+    await generateAndSaveTree(env, deviceType, maker, model);
+  } catch (e) {
+    console.error('generateAndSaveTree error:', e);
+  }
+
+  return newDeviceId;
 }
 
 async function handleCustomerWebhook(request, env) {
@@ -175,15 +186,24 @@ async function handleCustomerWebhook(request, env) {
 
       const key = stateKeyFor(event);
 
-      // 機種選択の postback
       if (event.type === 'postback') {
         const params = new URLSearchParams(event.postback.data);
         if (params.get('action') === 'select_device') {
           const deviceId = params.get('device_id');
           const state = await getState(env.DB, key);
           const symptomText = state?.payload?.symptomText || '';
-          await clearState(env.DB, key);
+          const deviceType  = state?.payload?.deviceType || '';
 
+          if (deviceId === '__new__') {
+            await saveState(env.DB, key, company.company_id, 'awaiting_device_registration', { symptomText, deviceType });
+            await line.reply(
+              event.replyToken,
+              `${deviceType}のメーカーと型番を教えてください。\n(例: Canon iR-ADV C3830)`
+            );
+            continue;
+          }
+
+          await clearState(env.DB, key);
           const result = await matcher.matchForDevice(deviceId, symptomText);
           await handleMatchResult(env, line, event.replyToken, company, symptomText, result);
         }
@@ -193,7 +213,6 @@ async function handleCustomerWebhook(request, env) {
       if (event.type !== 'message' || event.message?.type !== 'text') continue;
       const symptomText = event.message.text;
 
-      // 機種登録待ちの状態か確認(「メーカー 型番」の形式で返信されることを想定)
       const state = await getState(env.DB, key);
       if (state?.state_type === 'awaiting_device_registration') {
         const parts = symptomText.trim().split(/\s+/);
@@ -202,20 +221,8 @@ async function handleCustomerWebhook(request, env) {
         const deviceType = state.payload.deviceType;
         const origSymptom = state.payload.symptomText;
 
-        const newDeviceId = `D${Date.now()}`;
-        await env.DB.prepare(`
-          INSERT INTO devices (device_id, company_id, device_type, maker, model, location, install_date, notes)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `).bind(newDeviceId, company.company_id, deviceType, maker, model, '未設定', new Date().toISOString().slice(0, 10), 'CL自己登録').run();
-
         await clearState(env.DB, key);
-
-        // その機種専用の症状診断ツリーを自動生成(失敗しても共通版で動作継続するため待たずに投げっぱなしにはしない)
-        try {
-          await generateAndSaveTree(env, deviceType, maker, model);
-        } catch (e) {
-          console.error('generateAndSaveTree error:', e);
-        }
+        const newDeviceId = await registerNewDevice(env, company, deviceType, maker, model);
 
         const result = await matcher.matchForDevice(newDeviceId, origSymptom);
         await line.reply(
@@ -239,10 +246,10 @@ async function handleCustomerWebhook(request, env) {
       const result = await matcher.match(company.company_id, symptomText);
 
       if (result.status === 'needs_device_selection') {
-        await saveState(env.DB, key, company.company_id, 'awaiting_device_selection', { symptomText });
+        await saveState(env.DB, key, company.company_id, 'awaiting_device_selection', { symptomText, deviceType: result.deviceType });
         await line.replyWithQuickReply(
           event.replyToken,
-          `該当する${result.deviceType}が複数登録されています。どちらですか?`,
+          `${result.deviceType}の不調ですね。該当する機器を選んでください。`,
           result.options.map(o => ({ label: o.label, data: `action=select_device&device_id=${o.device_id}` }))
         );
         continue;
