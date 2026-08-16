@@ -1,10 +1,9 @@
 /**
- * A-Zent IT保守サブスク - Cloudflare Workers メインエントリ v2.7
+ * A-Zent IT保守サブスク - Cloudflare Workers メインエントリ v2.8
  *
- * v2.7変更点:
- *   機種選択の選択肢に「登録されていない機器」を追加。
- *   選択されると自己登録フロー(メーカー・型番入力→登録→
- *   ツリー自動生成→照合)へ進む。
+ * v2.8変更点:
+ *   機器選択後、diagnosis_trees にツリーがあればボタン式診断
+ *   (diagnosisEngine)へ進む。無ければ従来のmatchEngineフォールバック。
  */
 
 import { MatchEngine }    from './matchEngine.js';
@@ -12,6 +11,7 @@ import { ApprovalEngine } from './approvalEngine.js';
 import { LineClient }     from './lineClient.js';
 import { Dispatcher }     from './dispatcher.js';
 import { generateAndSaveTree } from './treeGenerator.js';
+import { startDiagnosis, continueDiagnosis } from './diagnosisEngine.js';
 
 const ETA_OPTIONS = [
   { label: '15分以内', minutes: 15 },
@@ -159,6 +159,18 @@ async function registerNewDevice(env, company, deviceType, maker, model) {
   return newDeviceId;
 }
 
+/** 機器が確定した後の入り口。ツリーがあればボタン式診断、無ければ従来のmatchEngineへ */
+async function startForDevice(env, line, replyToken, key, company, deviceId, symptomText, matcher) {
+  const device = await env.DB.prepare('SELECT * FROM devices WHERE device_id = ?').bind(deviceId).first();
+  if (device) {
+    const started = await startDiagnosis(env, line, replyToken, key, company, device, symptomText);
+    if (started) return;
+  }
+  await clearState(env.DB, key);
+  const result = await matcher.matchForDevice(deviceId, symptomText);
+  await handleMatchResult(env, line, replyToken, company, symptomText, result);
+}
+
 async function handleCustomerWebhook(request, env) {
   try {
     const body = await request.text();
@@ -188,7 +200,15 @@ async function handleCustomerWebhook(request, env) {
 
       if (event.type === 'postback') {
         const params = new URLSearchParams(event.postback.data);
-        if (params.get('action') === 'select_device') {
+        const action = params.get('action');
+
+        if (action === 'tree_next') {
+          const nodeId = params.get('node');
+          await continueDiagnosis(env, line, event.replyToken, key, nodeId);
+          continue;
+        }
+
+        if (action === 'select_device') {
           const deviceId = params.get('device_id');
           const state = await getState(env.DB, key);
           const symptomText = state?.payload?.symptomText || '';
@@ -203,9 +223,7 @@ async function handleCustomerWebhook(request, env) {
             continue;
           }
 
-          await clearState(env.DB, key);
-          const result = await matcher.matchForDevice(deviceId, symptomText);
-          await handleMatchResult(env, line, event.replyToken, company, symptomText, result);
+          await startForDevice(env, line, event.replyToken, key, company, deviceId, symptomText, matcher);
         }
         continue;
       }
@@ -224,15 +242,8 @@ async function handleCustomerWebhook(request, env) {
         await clearState(env.DB, key);
         const newDeviceId = await registerNewDevice(env, company, deviceType, maker, model);
 
-        const result = await matcher.matchForDevice(newDeviceId, origSymptom);
-        await line.reply(
-          event.replyToken,
-          `機器を登録しました(${maker} ${model})。\n\n` + buildCustomerReply(result)
-        );
-        if (result.status === 'escalate_immediately' || result.status === 'no_match') {
-          const dispatcher = new Dispatcher(env);
-          await dispatcher.dispatch(company.company_id, origSymptom, result.status, { maker, model });
-        }
+        await line.reply(event.replyToken, `機器を登録しました(${maker} ${model})。診断を開始します。`);
+        await startForDevice(env, line, event.replyToken, key, company, newDeviceId, origSymptom, matcher);
         continue;
       }
 
