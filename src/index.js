@@ -13,6 +13,7 @@ import { MatchEngine }    from './matchEngine.js';
 import { ApprovalEngine } from './approvalEngine.js';
 import { LineClient }     from './lineClient.js';
 import { Dispatcher }     from './dispatcher.js';
+import { generateAndSaveTree } from './treeGenerator.js';
 
 const ETA_OPTIONS = [
   { label: '15分以内', minutes: 15 },
@@ -208,6 +209,13 @@ async function handleCustomerWebhook(request, env) {
         `).bind(newDeviceId, company.company_id, deviceType, maker, model, '未設定', new Date().toISOString().slice(0, 10), 'CL自己登録').run();
 
         await clearState(env.DB, key);
+
+        // その機種専用の症状診断ツリーを自動生成(失敗しても共通版で動作継続するため待たずに投げっぱなしにはしない)
+        try {
+          await generateAndSaveTree(env, deviceType, maker, model);
+        } catch (e) {
+          console.error('generateAndSaveTree error:', e);
+        }
 
         const result = await matcher.matchForDevice(newDeviceId, origSymptom);
         await line.reply(
