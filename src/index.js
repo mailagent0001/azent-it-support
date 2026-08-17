@@ -143,6 +143,14 @@ function stateKeyFor(event) {
   return `u:${event.source?.userId}`;
 }
 
+/** 会社が登録している機器の大分類一覧(重複なし)を取得 */
+async function getOwnedDeviceTypes(db, companyId) {
+  const rows = await db.prepare(
+    'SELECT DISTINCT device_type FROM devices WHERE company_id = ?'
+  ).bind(companyId).all();
+  return (rows.results || []).map(r => r.device_type);
+}
+
 async function registerNewDevice(env, company, deviceType, maker, model) {
   const newDeviceId = `D${Date.now()}`;
   await env.DB.prepare(`
@@ -208,6 +216,30 @@ async function handleCustomerWebhook(request, env) {
           continue;
         }
 
+        if (action === 'select_category') {
+          const deviceType = params.get('device_type');
+          const state = await getState(env.DB, key);
+          const symptomText = state?.payload?.symptomText || '';
+
+          const devicesOfType = await env.DB.prepare(
+            'SELECT * FROM devices WHERE company_id = ? AND device_type = ?'
+          ).bind(company.company_id, deviceType).all();
+
+          const options = (devicesOfType.results || []).map(d => ({
+            device_id: d.device_id,
+            label: `${d.maker || ''}${d.model || ''}(${d.location || ''})`
+          }));
+          options.push({ device_id: '__new__', label: '登録されていない機器' });
+
+          await saveState(env.DB, key, company.company_id, 'awaiting_device_selection', { symptomText, deviceType });
+          await line.replyWithQuickReply(
+            event.replyToken,
+            `${deviceType}ですね。該当する機器を選んでください。`,
+            options.map(o => ({ label: o.label, data: `action=select_device&device_id=${o.device_id}` }))
+          );
+          continue;
+        }
+
         if (action === 'select_device') {
           const deviceId = params.get('device_id');
           const state = await getState(env.DB, key);
@@ -255,6 +287,19 @@ async function handleCustomerWebhook(request, env) {
       }
 
       const result = await matcher.match(company.company_id, symptomText);
+
+      if (result.status === 'no_match') {
+        const types = await getOwnedDeviceTypes(env.DB, company.company_id);
+        if (types.length > 0) {
+          await saveState(env.DB, key, company.company_id, 'awaiting_category_selection', { symptomText });
+          await line.replyWithQuickReply(
+            event.replyToken,
+            `お困りごとですね。順を追って確認しますので、該当する機器を選んでください。`,
+            types.map(t => ({ label: t, data: `action=select_category&device_type=${encodeURIComponent(t)}` }))
+          );
+          continue;
+        }
+      }
 
       if (result.status === 'needs_device_selection') {
         await saveState(env.DB, key, company.company_id, 'awaiting_device_selection', { symptomText, deviceType: result.deviceType });
